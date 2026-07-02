@@ -22,6 +22,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -37,6 +38,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -125,15 +127,65 @@ fun MainScreen(rootDir: File,  thumbRoot: File){
         if (uris.isNotEmpty()) pendingImportUris = uris  // just store, LaunchedEffect handles the copy
     }
 
+    var importState by remember { mutableStateOf(ImportState()) }
+
     LaunchedEffect(pendingImportUris) {
         if (pendingImportUris.isEmpty()) return@LaunchedEffect
-        withContext(Dispatchers.IO) {
-            pendingImportUris.forEach { uri ->
-                copyUriToSandbox(context, uri, currentDir)
+
+        importState = ImportState(
+            isImporting = true,
+            totalFiles = pendingImportUris.size
+        )
+
+        var success = 0
+        var fail = 0
+
+        pendingImportUris.forEachIndexed { index, uri ->
+            val fileName = getDisplayName(context, uri)
+
+            importState = importState.copy(
+                currentFileName = fileName,
+                currentIndex = index + 1,
+                progress = 0f
+            )
+
+            val result = withContext(Dispatchers.IO) {
+                copyUriToSandboxWithProgress(
+                    context = context,
+                    uri = uri,
+                    targetDir = currentDir,
+                    onProgress = { progress ->
+                        importState = importState.copy(progress = progress)
+                    }
+                )
             }
+
+            if (result != null) success++ else fail++
+
+            importState = importState.copy(
+                successCount = success,
+                failCount = fail
+            )
         }
+
         refreshTrigger++
         pendingImportUris = emptyList()
+
+        importState = importState.copy(
+            isImporting = false,
+            errorMessage =
+                if (fail > 0) "$fail file(s) failed to import"
+                else null
+        )
+
+        if (!importState.isImporting && importState.successCount > 0) {
+            Toast.makeText(
+                context,
+                "Imported ${importState.successCount} file(s)"
+                        + if (importState.failCount > 0) ", ${importState.failCount} failed" else "",
+                Toast.LENGTH_LONG
+            ).show()
+        }
     }
 
 
@@ -211,58 +263,147 @@ fun MainScreen(rootDir: File,  thumbRoot: File){
             onDismiss = { pendingDelete = null }
         )
     }
+    if (importState.isImporting) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Importing files") },
+            text = {
+                Column {
+                    Text("${importState.currentIndex}/${importState.totalFiles}")
+                    Text(importState.currentFileName)
+
+                    LinearProgressIndicator(
+                        progress = { importState.progress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 12.dp)
+                    )
+                }
+            },
+            confirmButton = {}
+        )
+    }
+
 }
 
-fun copyUriToSandbox(context: Context, uri: Uri, targetDir: File): File? {
+//fun copyUriToSandbox(context: Context, uri: Uri, targetDir: File): File? {
+//    return try {
+//
+//        val fileName = context.contentResolver.query(
+//            uri,
+//            arrayOf(OpenableColumns.DISPLAY_NAME),
+//            null, null, null
+//        )?.use { cursor ->
+//            if (cursor.moveToFirst()) {
+//                cursor.getString(cursor.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME))
+//            } else null
+//        } ?: "import_${System.currentTimeMillis()}"
+//
+//        // avoid overwrite
+//        var destFile = File(targetDir, fileName)
+//        var counter = 1
+//
+//        while (destFile.exists()) {
+//            val name = fileName.substringBeforeLast(".")
+//            val ext = fileName.substringAfterLast(".", "")
+//            destFile = if (fileName.contains(".")) {
+//                File(targetDir, "$name($counter).$ext")
+//            } else {
+//                File(targetDir, "$name($counter)")
+//            }
+//            counter++
+//        }
+//
+//        val tempFile = File(targetDir, "${destFile.name}.tmp")
+//
+//        val input = context.contentResolver.openInputStream(uri)
+//            ?: throw IOException("Cannot open input stream")
+//
+//        input.use { inputStream ->
+//            tempFile.outputStream().use { output ->
+//                inputStream.copyTo(output)
+//            }
+//        }
+//
+//        if (!tempFile.exists() || tempFile.length() == 0L) {
+//            tempFile.delete()
+//            throw IOException("Copy failed or empty file")
+//        }
+//
+//        tempFile.renameTo(destFile)
+//
+//        Log.d("Import", "Success: ${destFile.name} (${destFile.length()} bytes)")
+//
+//        destFile
+//
+//    } catch (e: Exception) {
+//        Log.e("Import", "Error: ${e.message}")
+//        null
+//    }
+//}
+
+fun copyUriToSandboxWithProgress(
+    context: Context,
+    uri: Uri,
+    targetDir: File,
+    onProgress: (Float) -> Unit
+): File? {
     return try {
+        val fileName = getDisplayName(context, uri)
 
-        val fileName = context.contentResolver.query(
-            uri,
-            arrayOf(OpenableColumns.DISPLAY_NAME),
-            null, null, null
-        )?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                cursor.getString(cursor.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME))
-            } else null
-        } ?: "import_${System.currentTimeMillis()}"
-
-        // avoid overwrite
         var destFile = File(targetDir, fileName)
         var counter = 1
 
         while (destFile.exists()) {
             val name = fileName.substringBeforeLast(".")
             val ext = fileName.substringAfterLast(".", "")
+
             destFile = if (fileName.contains(".")) {
                 File(targetDir, "$name($counter).$ext")
             } else {
                 File(targetDir, "$name($counter)")
             }
+
             counter++
         }
 
         val tempFile = File(targetDir, "${destFile.name}.tmp")
 
-        val input = context.contentResolver.openInputStream(uri)
-            ?: throw IOException("Cannot open input stream")
+        val totalBytes = context.contentResolver.openFileDescriptor(uri, "r")
+            ?.use { it.statSize }
+            ?: -1L
 
-        input.use { inputStream ->
+        context.contentResolver.openInputStream(uri)?.use { input ->
             tempFile.outputStream().use { output ->
-                inputStream.copyTo(output)
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                var copiedBytes = 0L
+
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read == -1) break
+
+                    output.write(buffer, 0, read)
+                    copiedBytes += read
+
+                    if (totalBytes > 0) {
+                        onProgress(copiedBytes.toFloat() / totalBytes.toFloat())
+                    }
+                }
             }
-        }
+        } ?: throw IOException("Cannot open input stream")
 
         if (!tempFile.exists() || tempFile.length() == 0L) {
             tempFile.delete()
             throw IOException("Copy failed or empty file")
         }
 
-        tempFile.renameTo(destFile)
+        if (!tempFile.renameTo(destFile)) {
+            tempFile.delete()
+            throw IOException("Rename failed")
+        }
 
-        Log.d("Import", "Success: ${destFile.name} (${destFile.length()} bytes)")
-
+        onProgress(1f)
         destFile
-
     } catch (e: Exception) {
         Log.e("Import", "Error: ${e.message}")
         null
@@ -399,32 +540,146 @@ fun DeleteConfirmDialog(
     )
 
 }
+fun getDisplayName(context: Context, uri: Uri): String {
+    return context.contentResolver.query(
+        uri,
+        arrayOf(OpenableColumns.DISPLAY_NAME),
+        null,
+        null,
+        null
+    )?.use { cursor ->
+        if (cursor.moveToFirst()) {
+            cursor.getString(
+                cursor.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME)
+            )
+        } else null
+    } ?: "import_${System.currentTimeMillis()}"
+}
 fun getOrGenerateVideoThumbnail(videoFile: File, thumbRoot: File): File? {
     val thumbFile = File(thumbRoot, "${videoFile.name}.jpg")
-
     if (thumbFile.exists()) return thumbFile
 
     return try {
-        val bitmap = MediaMetadataRetriever().use { retriever ->
-            retriever.setDataSource(videoFile.absolutePath)
-//            retriever.embeddedPicture?.let {
-//                BitmapFactory.decodeByteArray(it, 0, it.size)
-//            } ?: retriever.getFrameAtTime(0)
-            retriever.getFrameAtTime(
-                1_000_000,
+        val retriever = MediaMetadataRetriever()
+        retriever.setDataSource(videoFile.absolutePath)
+
+        val durationMs = retriever
+            .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+            ?.toLongOrNull() ?: 0L
+
+        val timesUs = listOf(
+            1_000_000L,
+            durationMs * 250L, // 25%
+            durationMs * 500L, // 50%
+            durationMs * 750L  // 75%
+        )
+
+        var bitmap: Bitmap? = null
+
+        for (timeUs in timesUs) {
+            val frame = retriever.getFrameAtTime(
+                timeUs,
                 MediaMetadataRetriever.OPTION_CLOSEST_SYNC
             )
-        } ?: return null
+            val debugRoot = File(thumbRoot, "debug")
+
+            if (frame != null) {
+                Log.d("ThumbInspect", "Checking frame at timeUs=$timeUs")
+//                saveDebugFrame(frame, debugRoot, videoFile.nameWithoutExtension, timeUs)
+                inspectBitmap(frame)
+
+                if (!isMostlyBlack(frame)) {
+                    bitmap = frame
+                    break
+                } else {
+                    frame.recycle()
+                }
+            }
+        }
+
+        retriever.release()
+
+        if (bitmap == null) return null
 
         thumbFile.outputStream().use { out ->
             bitmap.compress(Bitmap.CompressFormat.JPEG, 80, out)
         }
+
         bitmap.recycle()
         thumbFile
     } catch (e: Exception) {
-        Log.d("Thumbnail Error!","Thumbnail Generate error: ${e.message}")
+        Log.d("Thumbnail Error!", "Thumbnail Generate error: ${e.message}")
         null
     }
+}
+fun isMostlyBlack(bitmap: Bitmap): Boolean {
+    val small = Bitmap.createScaledBitmap(bitmap, 32, 32, false)
+
+    var darkPixels = 0
+    val totalPixels = small.width * small.height
+
+    for (x in 0 until small.width) {
+        for (y in 0 until small.height) {
+            val pixel = small.getPixel(x, y)
+
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            val brightness = (r + g + b) / 3
+
+
+
+            if (brightness < 25) {
+                darkPixels++
+            }
+        }
+    }
+
+    small.recycle()
+
+    return darkPixels > totalPixels * 0.85
+}
+fun inspectBitmap(bitmap: Bitmap, tag: String = "ThumbInspect") {
+    val small = Bitmap.createScaledBitmap(bitmap, 64, 64, false)
+
+    var darkPixels = 0
+    var totalBrightness = 0L
+    val totalPixels = small.width * small.height
+
+    for (x in 0 until small.width) {
+        for (y in 0 until small.height) {
+            val pixel = small.getPixel(x, y)
+
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+
+            val brightness = (r + g + b) / 3
+            totalBrightness += brightness
+
+            if (brightness < 35) {
+                darkPixels++
+            }
+        }
+    }
+
+    val avgBrightness = totalBrightness / totalPixels
+    val darkRatio = darkPixels.toFloat() / totalPixels
+
+    Log.d(tag, "avgBrightness=$avgBrightness, darkRatio=$darkRatio")
+
+    small.recycle()
+}
+fun saveDebugFrame(bitmap: Bitmap, debugRoot: File, videoName: String, timeUs: Long) {
+    if (!debugRoot.exists()) debugRoot.mkdirs()
+
+    val file = File(debugRoot, "${videoName}_$timeUs.jpg")
+
+    file.outputStream().use { out ->
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+    }
+
+    Log.d("ThumbInspect", "Saved debug frame: ${file.absolutePath}")
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -458,14 +713,14 @@ fun FileListItem(
                     model = entry.file,
                     contentDescription = entry.name,
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.size(48.dp)
+                    modifier = Modifier.size(72.dp)
                 )
                 entry.isVideo -> if (thumbnailFile != null) {
                     AsyncImage(
                         model = thumbnailFile,
                         contentDescription = entry.name,
                         contentScale = ContentScale.Crop,
-                        modifier = Modifier.size(48.dp)
+                        modifier = Modifier.size(72.dp)
                     )
                 } else {
                     Icon(Icons.Default.PlayArrow, contentDescription = null)

@@ -1,5 +1,9 @@
 package com.example.myjetpackcompose
 
+import androidx.media3.common.C
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
+
 import android.net.Uri
 import android.view.SurfaceView
 import androidx.annotation.OptIn as AndroidOptIn
@@ -46,13 +50,20 @@ fun VideoPlayerScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
-    val player = remember {
-        ExoPlayer.Builder(context).build()
-    }
+//    val player = remember {
+//        ExoPlayer.Builder(context).build()
+//    }
     var currentIndex by remember { mutableIntStateOf(startIndex) }
-    val thisVideoFile = videoFiles[currentIndex]
-    val hasPrevious = player.hasPreviousMediaItem()
-    val hasNext = player.hasNextMediaItem()
+
+    var previousSlot by remember { mutableStateOf<PlayerSlot?>(null) }
+    var currentSlot by remember { mutableStateOf<PlayerSlot?>(null) }
+    var nextSlot by remember { mutableStateOf<PlayerSlot?>(null) }
+
+    val currentPlayer = currentSlot?.player
+    val thisVideoFile = videoFiles.getOrNull(currentIndex)
+
+    val hasPrevious = previousSlot != null
+    val hasNext = nextSlot != null
 
 
 
@@ -71,7 +82,11 @@ fun VideoPlayerScreen(
 
 
     DisposableEffect(Unit) {
-        onDispose { player.release() }
+        onDispose {
+            previousSlot?.player?.release()
+            currentSlot?.player?.release()
+            nextSlot?.player?.release()
+        }
     }
 
     // --- UI state ---
@@ -88,16 +103,113 @@ fun VideoPlayerScreen(
 //    var durationMS by remember { mutableLongStateOf(0L) }
 
     // this runs whenever currentIndex changes
-    LaunchedEffect(videoFiles) {
-        val mediaItems = videoFiles.map {
-            MediaItem.fromUri(Uri.fromFile(it))
-        }
+    LaunchedEffect(videoFiles, startIndex) {
+        previousSlot?.player?.release()
+        currentSlot?.player?.release()
+        nextSlot?.player?.release()
 
-        player.setMediaItems(mediaItems)
-        player.prepare()
-        player.seekTo(startIndex, 0)
-        player.play()
+        currentIndex = startIndex
+
+        //
+        currentSlot = PlayerSlot(
+            startIndex,
+            createPreparedPlayer(context, videoFiles[startIndex], true)
+        )
+
+        previousSlot = null
+        nextSlot = null
+
+        //TO DO: un comment block below, this is for testing
+
+//        currentSlot = PlayerSlot(
+//            startIndex,
+//            createPreparedPlayer(context, videoFiles[startIndex], true)
+//        )
+//
+//        previousSlot = if (startIndex > 0) {
+//            PlayerSlot(
+//                startIndex - 1,
+//                createPreparedPlayer(context, videoFiles[startIndex - 1])
+//            )
+//        } else null
+//
+//        nextSlot = if (startIndex + 1 < videoFiles.size) {
+//            PlayerSlot(
+//                startIndex + 1,
+//                createPreparedPlayer(context, videoFiles[startIndex + 1])
+//            )
+//        } else null
     }
+
+    fun goNext() {
+        val oldPrevious = previousSlot
+        val oldCurrent = currentSlot
+        val oldNext = nextSlot ?: return
+
+        oldPrevious?.player?.release()
+
+        oldCurrent?.player?.pause()
+        oldCurrent?.player?.clearVideoSurface()
+
+        previousSlot = oldCurrent
+        currentSlot = oldNext
+        currentIndex = oldNext.index
+
+        videoRatio = 16f / 9f // reset while waiting for real size
+
+        oldNext.player.playWhenReady = true
+        oldNext.player.play()
+
+        val newNextIndex = oldNext.index + 1
+        nextSlot = if (newNextIndex < videoFiles.size) {
+            PlayerSlot(
+                newNextIndex,
+                createPreparedPlayer(context, videoFiles[newNextIndex])
+            )
+        } else null
+    }
+
+
+    fun goPrevious() {
+        val oldPrevious = previousSlot ?: return
+        val oldCurrent = currentSlot
+        val oldNext = nextSlot
+
+        oldNext?.player?.release()
+
+        oldCurrent?.player?.pause()
+        oldCurrent?.player?.clearVideoSurface()
+
+        nextSlot = oldCurrent
+        currentSlot = oldPrevious
+        currentIndex = oldPrevious.index
+
+        videoRatio = 16f / 9f // reset while waiting for real size
+
+        oldPrevious.player.playWhenReady = true
+        oldPrevious.player.play()
+
+        val newPreviousIndex = oldPrevious.index - 1
+        previousSlot = if (newPreviousIndex >= 0) {
+            PlayerSlot(
+                newPreviousIndex,
+                createPreparedPlayer(context, videoFiles[newPreviousIndex])
+            )
+        } else null
+    }
+
+
+
+//    LaunchedEffect(videoFiles) {
+//        val mediaItems = videoFiles.map {
+//            MediaItem.fromUri(Uri.fromFile(it))
+//        }
+//
+//        player.setMediaItems(mediaItems)
+//        player.prepare()
+//        player.seekTo(startIndex, 0)
+//        player.play()
+//    }
 
     // Listen to player state changes
 //    DisposableEffect(player) {
@@ -109,37 +221,59 @@ fun VideoPlayerScreen(
 //        player.addListener(listener)
 //        onDispose { player.removeListener(listener) }
 //    }
-    DisposableEffect(player) {
+    DisposableEffect(currentPlayer) {
+        val player = currentPlayer ?: return@DisposableEffect onDispose {}
+
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
             }
-            override fun onMediaItemTransition(
-                mediaItem: MediaItem?,
-                reason: Int
-            ) {
-                currentIndex = player.currentMediaItemIndex
-            }
+
             override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
                 if (videoSize.height > 0) {
                     videoRatio = videoSize.width.toFloat() / videoSize.height.toFloat()
                 }
             }
+            override fun onTracksChanged(tracks: Tracks) {
+                val textTrackGroup = tracks.groups.firstOrNull {
+                    it.type == C.TRACK_TYPE_TEXT
+                }
+
+                if (textTrackGroup != null) {
+                    player.trackSelectionParameters =
+                        player.trackSelectionParameters
+                            .buildUpon()
+                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                            .setOverrideForType(
+                                TrackSelectionOverride(textTrackGroup.mediaTrackGroup, 0)
+                            )
+                            .build()
+                }
+            }
         }
+
+
         player.addListener(listener)
-        onDispose { player.removeListener(listener) }
+
+        onDispose {
+            player.removeListener(listener)
+        }
     }
 
     // Poll position every 500ms
-    LaunchedEffect(player) {
+    LaunchedEffect(currentPlayer) {
         while (true) {
-            if (!isSeeking) {
+            val player = currentPlayer
+
+            if (!isSeeking && player != null) {
                 currentMs = player.currentPosition
                 durationMs = player.duration.coerceAtLeast(0L)
+
                 if (durationMs > 0) {
                     sliderPosition = currentMs.toFloat() / durationMs.toFloat()
                 }
             }
+
             delay(500)
         }
     }
@@ -187,15 +321,29 @@ fun VideoPlayerScreen(
 //            onDispose { player.removeListener(listener) }
 //        }
 
+//        AndroidView(
+//            factory = { ctx ->
+//                SurfaceView(ctx).also { sv ->
+//                    player.setVideoSurfaceView(sv)
+//                }
+//            },
+//            modifier = Modifier
+//                .fillMaxWidth()
+//                .aspectRatio(videoRatio)   // ← now uses real video dimensions
+//                .align(Alignment.Center)
+//        )
         AndroidView(
             factory = { ctx ->
-                SurfaceView(ctx).also { sv ->
-                    player.setVideoSurfaceView(sv)
+                androidx.media3.ui.PlayerView(ctx).apply {
+                    useController = false
                 }
+            },
+            update = { playerView ->
+                playerView.player = currentPlayer
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(videoRatio)   // ← now uses real video dimensions
+                .aspectRatio(videoRatio)
                 .align(Alignment.Center)
         )
 
@@ -227,7 +375,7 @@ fun VideoPlayerScreen(
                         )
                     }
                     Text(
-                        text = thisVideoFile.nameWithoutExtension,
+                        text = thisVideoFile?.nameWithoutExtension ?: "<null>",
                         color = Color.White,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Medium,
@@ -243,7 +391,7 @@ fun VideoPlayerScreen(
                     modifier = Modifier.align(Alignment.Center)
                 ) {
                     IconButton(
-                        onClick = {  player.seekToPreviousMediaItem() },
+                        onClick = {   goPrevious() },
                         enabled = hasPrevious,
                         modifier = Modifier.size(56.dp)
                     ) {
@@ -256,7 +404,12 @@ fun VideoPlayerScreen(
                     }
 
                     IconButton(
-                        onClick = { if (isPlaying) player.pause() else player.play() },
+                        onClick = {
+                            currentPlayer?.let {
+                                if (it.isPlaying) it.pause()
+                                else it.play()
+                            }
+                        },
                         modifier = Modifier.size(72.dp)
                     ) {
                         Icon(
@@ -268,7 +421,7 @@ fun VideoPlayerScreen(
                     }
 
                     IconButton(
-                        onClick = { player.seekToNextMediaItem()},
+                        onClick = { goNext()},
                         enabled = hasNext,
                         modifier = Modifier.size(56.dp)
                     ) {
@@ -312,7 +465,7 @@ fun VideoPlayerScreen(
                             currentMs = (newValue * durationMs).toLong()
                         },
                         onValueChangeFinished = {
-                            player.seekTo((sliderPosition * durationMs).toLong())
+                            currentPlayer?.seekTo((sliderPosition * durationMs).toLong())
                             isSeeking = false
                         },
                         thumb = {
@@ -365,10 +518,14 @@ fun VideoPlayerScreen(
                         skipOptions.forEach { (label, ms) ->
                             OutlinedButton(
                                 onClick = {
-                                    player.seekTo(
-                                        (player.currentPosition + ms)
-                                            .coerceIn(0L, player.duration)
-                                    )
+                                    currentPlayer?.let { player ->
+                                        val safeDuration = player.duration.coerceAtLeast(0L)
+
+                                        player.seekTo(
+                                            (player.currentPosition + ms)
+                                                .coerceIn(0L, safeDuration)
+                                        )
+                                    }
                                 },
                                 modifier = Modifier
                                     .weight(1f)    // ← each button takes equal share of the row
